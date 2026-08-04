@@ -1,701 +1,646 @@
---[[ Services ]]--
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 
---[[ Variables ]]--
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
 
-local localPlayer = Players.LocalPlayer
-local camera = Workspace.CurrentCamera
-
-local abs, cos, sin, rad = math.abs, math.cos, math.sin, math.rad
-local huge, round, clamp = math.huge, math.round, math.clamp
-
-local WHITE = Color3.new(1, 1, 1)
-local BLACK = Color3.new(0, 0, 0)
-
-local BOX_3D_EDGES = {
-	{ 1, 2 }, { 2, 3 }, { 3, 4 }, { 4, 1 },
-	{ 5, 6 }, { 6, 7 }, { 7, 8 }, { 8, 5 },
-	{ 1, 5 }, { 2, 6 }, { 3, 7 }, { 4, 8 },
-}
-
-local esp = {
-	Fonts = (Drawing and Drawing.Fonts) or { UI = 0, System = 1, Plex = 2, Monospace = 3 },
-	container = {},
-	settings = {
-		enabled = false,
-
-		boxes = true,
-		boxType = "2d", -- "2d" | "3d"
-		boxThickness = 1,
-
-		tracers = false,
-		tracerOrigin = "bottom", -- "bottom" | "center" | "top" | "mouse"
-		tracerThickness = 1,
-
-		skeletons = false,
-		skeletonThickness = 1,
-
-		health = true,
-
-		names = true,
-		distances = true,
-		useDisplayNames = false,
-		textSize = 14,
-		font = 0,
-		textOpacity = 1,
-
-		offscreenArrows = false,
-		arrowOffset = 120,
-		arrowHeight = 18,
-		arrowWidth = 12,
-
-		teammates = true,
-		useTeamColours = true,
-		enemyColour = Color3.fromRGB(220, 70, 70),
-		friendlyColour = Color3.fromRGB(80, 200, 120),
-		colour = WHITE,
-		opacity = 1,
-
-		-- optional: only draw the N closest players
-		closestOnly = false,
-		maxClosest = 1, -- how many closest to show when closestOnly is true
-		maxDistance = nil, -- optional studs cap (nil = no limit)
-
-		scanDescendants = false,
+local Visuals = {
+	Settings = {
+		TeamCheck = false,
+		AliveCheck = false,
+		DefaultColor = Color3.new(1, 1, 1),
+		TeamColors = {
+			Ally = Color3.new(0, 0, 1),
+			Enemy = Color3.new(1, 0, 0),
+		},
+		MaxDistance = 2000,
 	},
+	Tracers = {
+		Enabled = false,
+		Origin = "Bottom",
+		Thickness = 1,
+	},
+	Boxes = {
+		Enabled = false,
+		Filled = false,
+	},
+	Names = {
+		Enabled = false,
+		Size = 13,
+	},
+	Distance = {
+		Enabled = false,
+		Size = 13,
+		ShowStuds = true,
+	},
+	HealthBar = {
+		Enabled = false,
+		Origin = "Right",
+	},
+	Chams = {
+		Enabled = false,
+		FillTransparency = 0.5,
+		OutlineTransparency = 0,
+	},
+	Items = {
+		Enabled = false,
+		ShowDistance = false,
+		MaxDistance = 100,
+		Chams = {
+			Enabled = false,
+			Color = Color3.new(1, 1, 0),
+			OutlineColor = Color3.new(1, 1, 1),
+			FillTransparency = 0.5,
+			OutlineTransparency = 0,
+		},
+		ValidItemNames = {},
+		ValidItemTypes = {},
+	},
+	Container = {},
+	ItemContainer = {},
+	ChamsContainer = {},
 }
 
-esp.settings.font = esp.Fonts.UI or 0
+-- Per-frame cache
+local localRoot = nil
+local localPos = nil
+local tracerOrigin = Vector2.zero
+local anyPlayerEsp = false
+local anyItemEsp = false
+local lastItemScan = 0
+local scanExistingItems
 
---[[ Helpers ]]--
-
-local function destroyObj(obj)
-	if not obj then
-		return
+local function createDrawing(drawingType, properties)
+	local object = Drawing.new(drawingType)
+	for property, value in pairs(properties) do
+		object[property] = value
 	end
-	pcall(function()
-		if obj.Destroy then
-			obj:Destroy()
-		elseif obj.Remove then
-			obj:Remove()
-		end
-	end)
+	return object
 end
 
-local function drawNew(className, props)
-	local obj = Drawing.new(className)
-	if props then
-		for key, value in pairs(props) do
-			obj[key] = value
-		end
-	end
-	return obj
+local function createHighlight(parent, settings)
+	local highlight = Instance.new("Highlight")
+	highlight.FillColor = settings.Color
+	highlight.OutlineColor = settings.OutlineColor or settings.Color
+	highlight.FillTransparency = settings.FillTransparency
+	highlight.OutlineTransparency = settings.OutlineTransparency
+	highlight.Adornee = parent
+	highlight.Parent = parent
+	return highlight
 end
 
-local function hideAll(drawings)
-	for i = 1, #drawings do
-		drawings[i].Visible = false
-	end
-end
-
-local function destroyAll(drawings)
-	for i = 1, #drawings do
-		destroyObj(drawings[i])
+local function hideDrawings(drawings)
+	for _, drawing in pairs(drawings) do
+		drawing.Visible = false
 	end
 end
 
-local function makeText(size, font)
-	return drawNew("Text", {
-		Center = true,
-		Outline = true,
-		OutlineColor = BLACK,
-		Color = WHITE,
-		Size = size,
-		Font = font,
-		Text = "",
-		Visible = false,
-	})
-end
-
-local function makeLine(thickness)
-	return drawNew("Line", {
-		Color = WHITE,
-		Thickness = thickness,
-		Visible = false,
-	})
-end
-
-local function makeSquare(thickness, filled)
-	return drawNew("Square", {
-		Color = WHITE,
-		Thickness = thickness,
-		Filled = filled and true or false,
-		Visible = false,
-	})
-end
-
-local function makeTriangle()
-	return drawNew("Triangle", {
-		Color = WHITE,
-		Filled = true,
-		Visible = false,
-	})
-end
-
-local function buildDrawings(bones, settings)
-	local drawings = {}
-	local parts = {
-		box2d = makeSquare(settings.boxThickness, false),
-		health = makeSquare(1, true),
-		name = makeText(settings.textSize, settings.font),
-		dist = makeText(settings.textSize, settings.font),
-		tracer = makeLine(settings.tracerThickness),
-		arrow = makeTriangle(),
-		box3d = {},
-		skeleton = {},
-	}
-
-	drawings[#drawings + 1] = parts.box2d
-	drawings[#drawings + 1] = parts.health
-	drawings[#drawings + 1] = parts.name
-	drawings[#drawings + 1] = parts.dist
-	drawings[#drawings + 1] = parts.tracer
-	drawings[#drawings + 1] = parts.arrow
-
-	for i = 1, 12 do
-		local edge = makeLine(settings.boxThickness)
-		parts.box3d[i] = edge
-		drawings[#drawings + 1] = edge
+function Visuals.GetTeamColor(target)
+	if not Visuals.Settings.TeamCheck then
+		return Visuals.Settings.DefaultColor
 	end
-
-	for i = 1, #bones do
-		local bone = makeLine(settings.skeletonThickness)
-		parts.skeleton[i] = bone
-		drawings[#drawings + 1] = bone
+	if target.Team == player.Team then
+		return Visuals.Settings.TeamColors.Ally
 	end
-
-	parts._all = drawings
-	return parts
+	return Visuals.Settings.TeamColors.Enemy
 end
 
---[[ Math porn ]]--
-
-local function accumulatePartBounds(obj, bounds)
-	local size = obj.Size
-	local sx, sy, sz = size.X, size.Y, size.Z
-	local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = obj.CFrame:GetComponents()
-	local wsx = 0.5 * (abs(r00) * sx + abs(r01) * sy + abs(r02) * sz)
-	local wsy = 0.5 * (abs(r10) * sx + abs(r11) * sy + abs(r12) * sz)
-	local wsz = 0.5 * (abs(r20) * sx + abs(r21) * sy + abs(r22) * sz)
-	if x - wsx < bounds.minX then bounds.minX = x - wsx end
-	if y - wsy < bounds.minY then bounds.minY = y - wsy end
-	if z - wsz < bounds.minZ then bounds.minZ = z - wsz end
-	if x + wsx > bounds.maxX then bounds.maxX = x + wsx end
-	if y + wsy > bounds.maxY then bounds.maxY = y + wsy end
-	if z + wsz > bounds.maxZ then bounds.maxZ = z + wsz end
-	bounds.found = true
-end
-
-local function getBounds(model, useDescendants)
-	if not model then
-		return nil, nil
-	end
-
-	-- BasePart refs (wild pets, pet slots, traps) have no children — use the part itself
-	if model:IsA("BasePart") then
-		return model.Position, model.Size
-	end
-
-	local bounds = {
-		minX = huge,
-		minY = huge,
-		minZ = huge,
-		maxX = -huge,
-		maxY = -huge,
-		maxZ = -huge,
-		found = false,
-	}
-
-	-- Always walk descendants — plant/fruit visuals are nested under folders
-	local parts = model:GetDescendants()
-	for i = 1, #parts do
-		local obj = parts[i]
-		if obj:IsA("BasePart") then
-			accumulatePartBounds(obj, bounds)
-		end
-	end
-
-	if not bounds.found and model:IsA("Model") then
-		local ok, pivot = pcall(model.GetPivot, model)
-		if ok and pivot then
-			local _, size = pcall(function()
-				return model:GetExtentsSize()
-			end)
-			return pivot.Position, size or Vector3.new(2, 2, 2)
-		end
-	end
-
-	if not bounds.found then
-		return nil, nil
-	end
-
-	local omin = Vector3.new(bounds.minX, bounds.minY, bounds.minZ)
-	local omax = Vector3.new(bounds.maxX, bounds.maxY, bounds.maxZ)
-	return (omax + omin) * 0.5, omax - omin
-end
-
-local function rotate2(vec, angle)
-	local a = rad(angle)
-	return Vector2.new(vec.X * cos(a) - vec.Y * sin(a), vec.X * sin(a) + vec.Y * cos(a))
-end
-
-local function toScreen(pos)
-	local p, onScreen = camera:WorldToViewportPoint(pos)
-	return Vector2.new(p.X, p.Y), onScreen, p.Z
-end
-
-local function healthColor(h)
-	return Color3.new(
-		h < 0.5 and 1 or 1 - ((h - 0.5) * 2),
-		h > 0.5 and 1 or h * 2,
-		0
-	)
-end
-
-local function isEnemy(player)
-	if not player then
-		return true
-	end
-	return player.Team ~= localPlayer.Team
-end
-
-local function resolveColour(settings, player, override)
-	if override then
-		return override
-	end
-	if settings.useTeamColours and player then
-		return settings[isEnemy(player) and "enemyColour" or "friendlyColour"]
-	end
-	return settings.colour
-end
-
-local function resolveTracerOrigin(origin, viewport)
-	if typeof(origin) == "Vector2" then
-		return origin
-	end
-	local kind = type(origin) == "string" and string.lower(origin) or "bottom"
-	if kind == "center" then
-		return viewport * 0.5
-	elseif kind == "top" then
-		return Vector2.new(viewport.X * 0.5, 10)
-	elseif kind == "mouse" then
+function Visuals.GetTracerOrigin()
+	local size = camera.ViewportSize
+	local origin = Visuals.Tracers.Origin
+	if origin == "Top" then
+		return Vector2.new(size.X * 0.5, 0)
+	elseif origin == "Center" or origin == "Middle" then
+		return Vector2.new(size.X * 0.5, size.Y * 0.5)
+	elseif origin == "Mouse" then
 		return UserInputService:GetMouseLocation()
 	end
-	return Vector2.new(viewport.X * 0.5, viewport.Y - 10)
+	return Vector2.new(size.X * 0.5, size.Y)
 end
 
-local function createBoneMap(model)
-	local map = {}
-	for _, v in ipairs(model:GetDescendants()) do
-		if v:IsA("Motor6D") and v.Part0 and v.Part1 then
-			map[#map + 1] = { v.Part0, v.Part1 }
-		end
+function Visuals.IsAlive(character)
+	if not Visuals.Settings.AliveCheck then
+		return true
 	end
-	return map
-end
-
-local function getHealthFraction(model)
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.MaxHealth <= 0 then
-		return 0
+	if not character then
+		return false
 	end
-	return clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
 end
 
-local function displayName(settings, player, fallback)
-	if player then
-		return player[settings.useDisplayNames and "DisplayName" or "Name"]
+function Visuals.GetHealth(character)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		return {
+			Health = humanoid.Health,
+			MaxHealth = humanoid.MaxHealth,
+		}
 	end
-	return fallback
+	return { Health = 0, MaxHealth = 100 }
 end
 
-local function box2d(center, size, camPos)
-	local cf = CFrame.new(center, camPos)
-	local r = size * 0.5
-	local corners = {
-		(cf * CFrame.new(r.X, r.Y, 0)).Position,
-		(cf * CFrame.new(r.X, -r.Y, 0)).Position,
-		(cf * CFrame.new(-r.X, r.Y, 0)).Position,
-		(cf * CFrame.new(-r.X, -r.Y, 0)).Position,
-	}
-	local minX, minY, maxX, maxY = huge, huge, 0, 0
-	for i = 1, 4 do
-		local s = toScreen(corners[i])
-		if s.X < minX then minX = s.X end
-		if s.X > maxX then maxX = s.X end
-		if s.Y < minY then minY = s.Y end
-		if s.Y > maxY then maxY = s.Y end
+function Visuals.IsValidItem(item)
+	if not item then
+		return false
 	end
-	return Vector2.new(minX, minY), Vector2.new(maxX - minX, maxY - minY), minX, minY, maxX, maxY
+	if not Visuals.Items.ValidItemTypes[item.ClassName] then
+		return false
+	end
+	return Visuals.Items.ValidItemNames[item.Name] == true
 end
 
-local function box3dCorners(center, size)
-	local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
-	return {
-		center + Vector3.new(-hx, hy, -hz),
-		center + Vector3.new(hx, hy, -hz),
-		center + Vector3.new(hx, hy, hz),
-		center + Vector3.new(-hx, hy, hz),
-		center + Vector3.new(-hx, -hy, -hz),
-		center + Vector3.new(hx, -hy, -hz),
-		center + Vector3.new(hx, -hy, hz),
-		center + Vector3.new(-hx, -hy, hz),
-	}
+function Visuals.GetItemPosition(item)
+	if item:IsA("BasePart") then
+		return item.Position
+	end
+	if item:IsA("Model") then
+		local part = item.PrimaryPart or item:FindFirstChild("Handle") or item:FindFirstChildWhichIsA("BasePart")
+		return part and part.Position
+	end
+	if item:IsA("Tool") then
+		local handle = item:FindFirstChild("Handle")
+		return handle and handle.Position
+	end
+	return nil
 end
 
-local function buildClosestSet(camPos, settings)
-	if not settings.closestOnly then
+-- Fast box: project head + feet from HRP (skips GetExtentsSize)
+local function getScreenBox(character)
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then
 		return nil
 	end
 
-	local ranked = {}
-	local maxDist = settings.maxDistance
-	local count = settings.maxClosest or 1
-	if count < 1 then
-		count = 1
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local head = character:FindFirstChild("Head")
+
+	local topPos
+	local bottomPos
+	if head then
+		topPos = head.Position + Vector3.new(0, 0.5, 0)
+		bottomPos = root.Position - Vector3.new(0, (humanoid and humanoid.HipHeight or 2) + 1.5, 0)
+	else
+		local height = (humanoid and humanoid.HipHeight or 2) + 2.5
+		topPos = root.Position + Vector3.new(0, height * 0.5, 0)
+		bottomPos = root.Position - Vector3.new(0, height * 0.5, 0)
 	end
 
-	for i = 1, #esp.container do
-		local inst = esp.container[i]
-		local model = inst.model
-		if model and model.Parent then
-			local player = inst.player
-			local skip = (not settings.teammates) and player and (not isEnemy(player))
-			if not skip then
-				local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-				local pos = root and root.Position
-				if not pos then
-					local center = getBounds(model, settings.scanDescendants)
-					pos = center
-				end
-				if pos then
-					local dist = (pos - camPos).Magnitude
-					if not maxDist or dist <= maxDist then
-						ranked[#ranked + 1] = { inst = inst, dist = dist }
-					end
-				end
-			end
-		end
+	local top, topOnScreen = camera:WorldToViewportPoint(topPos)
+	local bottom, bottomOnScreen = camera:WorldToViewportPoint(bottomPos)
+	if top.Z <= 0 and bottom.Z <= 0 then
+		return nil
 	end
-
-	table.sort(ranked, function(a, b)
-		return a.dist < b.dist
-	end)
-
-	local allowed = {}
-	for i = 1, math.min(count, #ranked) do
-		allowed[ranked[i].inst] = true
-	end
-	return allowed
-end
-
-local function update()
-	local settings = esp.settings
-	camera = Workspace.CurrentCamera
-
-	if not settings.enabled then
-		for i = 1, #esp.container do
-			hideAll(esp.container[i].draw._all)
-		end
-		return
-	end
-
-	local camCF = camera.CFrame
-	local camPos = camCF.Position
-	local viewport = camera.ViewportSize
-	local centerScreen = viewport * 0.5
-	local tracerOrigin = resolveTracerOrigin(settings.tracerOrigin, viewport)
-	local opacity = settings.opacity
-	local textOpacity = settings.textOpacity
-	local font = settings.font or esp.Fonts.UI
-	local closestSet = buildClosestSet(camPos, settings)
-	local maxDist = settings.maxDistance
-
-	for i = 1, #esp.container do
-		local inst = esp.container[i]
-		local draw = inst.draw
-		local model = inst.model
-
-		if not model or not model.Parent then
-			hideAll(draw._all)
-		elseif closestSet and not closestSet[inst] then
-			hideAll(draw._all)
-		else
-			local player = inst.player
-			local skip = (not settings.teammates) and player and (not isEnemy(player))
-			local center, size = nil, nil
-			if not skip then
-				center, size = getBounds(model, settings.scanDescendants)
-			end
-
-			if skip or not center then
-				hideAll(draw._all)
-			elseif maxDist and (center - camPos).Magnitude > maxDist then
-				hideAll(draw._all)
-			else
-				local screenPos, onScreen = toScreen(center)
-				local colour = resolveColour(settings, player, inst.colour)
-
-				hideAll(draw._all)
-
-				if onScreen then
-					local topLeft, boxSize, minX, minY, maxX, maxY = box2d(center, size, camPos)
-
-					-- 2d / 3d boxes
-					if settings.boxes then
-						if settings.boxType == "3d" then
-							local corners = box3dCorners(center, size)
-							local points = {}
-							for c = 1, 8 do
-								points[c] = toScreen(corners[c])
-							end
-							for e = 1, 12 do
-								local edge = BOX_3D_EDGES[e]
-								local lineObj = draw.box3d[e]
-								lineObj.From = points[edge[1]]
-								lineObj.To = points[edge[2]]
-								lineObj.Color = colour
-								lineObj.Thickness = settings.boxThickness
-								lineObj.Transparency = opacity
-								lineObj.Visible = true
-							end
-						else
-							local box = draw.box2d
-							box.Position = topLeft
-							box.Size = boxSize
-							box.Color = colour
-							box.Thickness = settings.boxThickness
-							box.Transparency = opacity
-							box.Visible = true
-						end
-					end
-
-					-- skeleton
-					if settings.skeletons then
-						local boneCache = {}
-						for b = 1, #inst.bones do
-							local pair = inst.bones[b]
-							local lineObj = draw.skeleton[b]
-							if lineObj and pair[1] and pair[2] and pair[1].Parent and pair[2].Parent then
-								if not boneCache[pair[1]] then
-									boneCache[pair[1]] = toScreen(pair[1].Position)
-								end
-								if not boneCache[pair[2]] then
-									boneCache[pair[2]] = toScreen(pair[2].Position)
-								end
-								lineObj.From = boneCache[pair[1]]
-								lineObj.To = boneCache[pair[2]]
-								lineObj.Color = colour
-								lineObj.Thickness = settings.skeletonThickness
-								lineObj.Transparency = opacity
-								lineObj.Visible = true
-							end
-						end
-					end
-
-					-- health
-					if settings.health then
-						local hp = getHealthFraction(model)
-						local h = boxSize.Y * hp
-						local bar = draw.health
-						bar.Position = Vector2.new(minX - 5, maxY - h)
-						bar.Size = Vector2.new(2, h)
-						bar.Color = healthColor(hp)
-						bar.Transparency = opacity
-						bar.Visible = true
-					end
-
-					-- name
-					if settings.names then
-						local label = draw.name
-						label.Text = displayName(settings, player, inst.name)
-						label.Size = settings.textSize
-						label.Font = font
-						label.Color = colour
-						label.Transparency = textOpacity
-						label.Position = Vector2.new(screenPos.X, minY - settings.textSize - 2)
-						label.Visible = true
-					end
-
-					-- distance
-					if settings.distances then
-						local label = draw.dist
-						label.Text = tostring(round((center - camPos).Magnitude)) .. "m"
-						label.Size = settings.textSize
-						label.Font = font
-						label.Color = colour
-						label.Transparency = textOpacity
-						label.Position = Vector2.new(screenPos.X, maxY + 2)
-						label.Visible = true
-					end
-
-					-- tracer
-					if settings.tracers then
-						local tracer = draw.tracer
-						tracer.From = tracerOrigin
-						tracer.To = Vector2.new(screenPos.X, maxY)
-						tracer.Color = colour
-						tracer.Thickness = settings.tracerThickness
-						tracer.Transparency = opacity
-						tracer.Visible = true
-					end
-				elseif settings.offscreenArrows then
-					local ray = camCF:PointToObjectSpace(center)
-					local dir = -Vector2.new(ray.X, ray.Z)
-					if dir.Magnitude > 0 then
-						dir = dir.Unit
-						local tip = dir * settings.arrowOffset
-						local half = settings.arrowWidth * 0.5
-						local arrow = draw.arrow
-						arrow.PointA = centerScreen - (tip + rotate2(dir, 90) * half)
-						arrow.PointB = centerScreen - (tip + rotate2(dir, -90) * half)
-						arrow.PointC = centerScreen - (dir * (settings.arrowOffset + settings.arrowHeight))
-						arrow.Color = colour
-						arrow.Transparency = opacity
-						arrow.Visible = true
-					end
-				end
-			end
-		end
-	end
-end
-
-function esp:add(model, options)
-	options = options or {}
-	if not model then
+	if not topOnScreen and not bottomOnScreen and top.Z <= 0 then
 		return nil
 	end
 
-	for i = 1, #self.container do
-		if self.container[i].model == model then
-			return self.container[i]
-		end
+	local height = math.abs(bottom.Y - top.Y)
+	if height < 2 then
+		height = 2
 	end
+	local width = height * 0.65
+	local centerX = (top.X + bottom.X) * 0.5
+	local topY = math.min(top.Y, bottom.Y)
 
-	local bones = options.bones or createBoneMap(model)
-	local inst = {
-		model = model,
-		player = Players:GetPlayerFromCharacter(model),
-		name = options.name or model.Name,
-		colour = options.colour,
-		bones = bones,
-		draw = buildDrawings(bones, self.settings),
-	}
-
-	local alwaysRemove = options.alwaysRemove
-	if alwaysRemove == nil then
-		alwaysRemove = true
-	end
-
-	inst.conn = model.AncestryChanged:Connect(function(_, parent)
-		if alwaysRemove and not parent then
-			self:remove(inst)
-		elseif options.removed and parent == options.removed then
-			self:remove(inst)
-		end
-	end)
-
-	self.container[#self.container + 1] = inst
-	return inst
+	return Vector2.new(centerX - width * 0.5, topY), Vector2.new(width, height), root
 end
 
-function esp:remove(instOrModel)
-	local model = typeof(instOrModel) == "Instance" and instOrModel or (instOrModel and instOrModel.model)
-	for i = 1, #self.container do
-		local inst = self.container[i]
-		if inst == instOrModel or inst.model == model then
-			if inst.conn then
-				inst.conn:Disconnect()
-			end
-			destroyAll(inst.draw._all)
-			table.remove(self.container, i)
-			return true
+local function refreshFeatureFlags()
+	anyPlayerEsp = Visuals.Boxes.Enabled
+		or Visuals.Names.Enabled
+		or Visuals.Distance.Enabled
+		or Visuals.HealthBar.Enabled
+		or Visuals.Tracers.Enabled
+		or Visuals.Chams.Enabled
+	anyItemEsp = Visuals.Items.Enabled
+end
+
+local function ensureChams(key, parent, color, settings)
+	local highlight = Visuals.ChamsContainer[key]
+	if highlight and highlight.Parent then
+		if highlight.Adornee ~= parent then
+			highlight.Adornee = parent
+			highlight.Parent = parent
 		end
+		highlight.FillColor = color
+		highlight.OutlineColor = color
+		highlight.FillTransparency = settings.FillTransparency
+		highlight.OutlineTransparency = settings.OutlineTransparency
+		highlight.Enabled = true
+		return highlight
 	end
-	return false
+
+	highlight = createHighlight(parent, {
+		Color = color,
+		OutlineColor = color,
+		FillTransparency = settings.FillTransparency,
+		OutlineTransparency = settings.OutlineTransparency,
+	})
+	Visuals.ChamsContainer[key] = highlight
+	return highlight
 end
 
-function esp:clear()
-	for i = #self.container, 1, -1 do
-		self:remove(self.container[i])
+local function disableChams(key)
+	local highlight = Visuals.ChamsContainer[key]
+	if highlight then
+		highlight.Enabled = false
 	end
 end
 
-function esp:has(model)
-	for i = 1, #self.container do
-		if self.container[i].model == model then
-			return true
-		end
-	end
-	return false
-end
-
-function esp:bindPlayers()
-	if self._playerBound then
+function Visuals.Create(target)
+	if target == player or Visuals.Container[target] then
 		return
 	end
-	self._playerBound = true
 
-	local function track(character)
-		if character then
-			self:add(character)
-		end
+	local teamColor = Visuals.GetTeamColor(target)
+	local drawings = {
+		Tracer = createDrawing("Line", {
+			Thickness = Visuals.Tracers.Thickness,
+			Visible = false,
+			Color = teamColor,
+			Transparency = 1,
+		}),
+		Box = createDrawing("Square", {
+			Thickness = 1,
+			Filled = Visuals.Boxes.Filled,
+			Visible = false,
+			Color = teamColor,
+			Transparency = 1,
+		}),
+		Name = createDrawing("Text", {
+			Text = target.Name,
+			Size = Visuals.Names.Size,
+			Center = true,
+			Outline = true,
+			OutlineColor = Color3.new(0, 0, 0),
+			Font = 2,
+			Visible = false,
+			Color = teamColor,
+			Transparency = 1,
+		}),
+		Distance = createDrawing("Text", {
+			Text = "",
+			Size = Visuals.Distance.Size,
+			Center = true,
+			Outline = true,
+			OutlineColor = Color3.new(0, 0, 0),
+			Font = 2,
+			Visible = false,
+			Color = teamColor,
+			Transparency = 1,
+		}),
+		HealthBarOutline = createDrawing("Square", {
+			Thickness = 1,
+			Filled = true,
+			Visible = false,
+			Color = Color3.new(0, 0, 0),
+			Transparency = 1,
+		}),
+		HealthBar = createDrawing("Square", {
+			Thickness = 1,
+			Filled = true,
+			Visible = false,
+			Color = Color3.new(0, 1, 0),
+			Transparency = 1,
+		}),
+	}
+
+	Visuals.Container[target] = {
+		drawings = drawings,
+		teamColor = teamColor,
+		lastTeam = target.Team,
+	}
+end
+
+function Visuals.CreateItem(item)
+	if not Visuals.Items.Enabled or not Visuals.IsValidItem(item) then
+		return
+	end
+	if Visuals.ItemContainer[item] then
+		return
 	end
 
-	local function hook(plr)
-		if plr == localPlayer then
+	local color = Visuals.Items.Chams.Color
+	local drawings = {
+		Name = createDrawing("Text", {
+			Text = item.Name,
+			Size = Visuals.Names.Size,
+			Center = true,
+			Outline = true,
+			OutlineColor = Color3.new(0, 0, 0),
+			Font = 2,
+			Visible = false,
+			Color = color,
+			Transparency = 1,
+		}),
+		Distance = createDrawing("Text", {
+			Text = "",
+			Size = Visuals.Distance.Size,
+			Center = true,
+			Outline = true,
+			OutlineColor = Color3.new(0, 0, 0),
+			Font = 2,
+			Visible = false,
+			Color = color,
+			Transparency = 1,
+		}),
+	}
+
+	Visuals.ItemContainer[item] = {
+		drawings = drawings,
+	}
+end
+
+function Visuals.Remove(target)
+	local entry = Visuals.Container[target]
+	if entry then
+		for _, drawing in pairs(entry.drawings) do
+			drawing:Remove()
+		end
+		Visuals.Container[target] = nil
+	end
+
+	local highlight = Visuals.ChamsContainer[target]
+	if highlight then
+		highlight:Destroy()
+		Visuals.ChamsContainer[target] = nil
+	end
+end
+
+function Visuals.RemoveItem(item)
+	local entry = Visuals.ItemContainer[item]
+	if entry then
+		for _, drawing in pairs(entry.drawings) do
+			drawing:Remove()
+		end
+		Visuals.ItemContainer[item] = nil
+	end
+
+	local highlight = Visuals.ChamsContainer[item]
+	if highlight then
+		highlight:Destroy()
+		Visuals.ChamsContainer[item] = nil
+	end
+end
+
+local function updatePlayer(target, entry)
+	local drawings = entry.drawings
+	local character = target.Character
+	if not character or not Visuals.IsAlive(character) then
+		hideDrawings(drawings)
+		disableChams(target)
+		return
+	end
+
+	if entry.lastTeam ~= target.Team then
+		entry.lastTeam = target.Team
+		entry.teamColor = Visuals.GetTeamColor(target)
+	end
+	local teamColor = entry.teamColor
+
+	local topLeft, boxSize, root = getScreenBox(character)
+	if not topLeft then
+		hideDrawings(drawings)
+		return
+	end
+
+	if localPos and Visuals.Settings.MaxDistance then
+		local dist = (root.Position - localPos).Magnitude
+		if dist > Visuals.Settings.MaxDistance then
+			hideDrawings(drawings)
+			disableChams(target)
 			return
 		end
-		if plr.Character then
-			track(plr.Character)
+	end
+
+	local centerX = topLeft.X + boxSize.X * 0.5
+
+	if Visuals.Boxes.Enabled then
+		drawings.Box.Size = boxSize
+		drawings.Box.Position = topLeft
+		drawings.Box.Filled = Visuals.Boxes.Filled
+		drawings.Box.Color = teamColor
+		drawings.Box.Visible = true
+	else
+		drawings.Box.Visible = false
+	end
+
+	if Visuals.Names.Enabled then
+		drawings.Name.Position = Vector2.new(centerX, topLeft.Y - 20)
+		drawings.Name.Size = Visuals.Names.Size
+		drawings.Name.Color = teamColor
+		drawings.Name.Visible = true
+	else
+		drawings.Name.Visible = false
+	end
+
+	if Visuals.Distance.Enabled and localPos then
+		local dist = math.floor((root.Position - localPos).Magnitude)
+		drawings.Distance.Text = tostring(dist) .. (Visuals.Distance.ShowStuds and " studs" or "")
+		drawings.Distance.Position = Vector2.new(centerX, topLeft.Y - 35)
+		drawings.Distance.Size = Visuals.Distance.Size
+		drawings.Distance.Color = teamColor
+		drawings.Distance.Visible = true
+	else
+		drawings.Distance.Visible = false
+	end
+
+	if Visuals.HealthBar.Enabled then
+		local health = Visuals.GetHealth(character)
+		local maxHealth = health.MaxHealth
+		if maxHealth <= 0 then
+			maxHealth = 1
 		end
-		plr.CharacterAdded:Connect(track)
+		local percent = math.clamp(health.Health / maxHealth, 0, 1)
+		local barWidth = 3
+		local barHeight = boxSize.Y
+		local barX = Visuals.HealthBar.Origin == "Left" and (topLeft.X - barWidth - 4) or (topLeft.X + boxSize.X + 4)
+		local barPos = Vector2.new(barX, topLeft.Y)
+
+		drawings.HealthBarOutline.Size = Vector2.new(barWidth, barHeight)
+		drawings.HealthBarOutline.Position = barPos
+		drawings.HealthBarOutline.Visible = true
+
+		drawings.HealthBar.Size = Vector2.new(barWidth, barHeight * percent)
+		drawings.HealthBar.Position = Vector2.new(barPos.X, barPos.Y + barHeight * (1 - percent))
+		drawings.HealthBar.Color = Color3.new(1 - percent, percent, 0)
+		drawings.HealthBar.Visible = true
+	else
+		drawings.HealthBar.Visible = false
+		drawings.HealthBarOutline.Visible = false
 	end
 
-	for _, plr in ipairs(Players:GetPlayers()) do
-		hook(plr)
+	if Visuals.Tracers.Enabled then
+		local screen, onScreen = camera:WorldToViewportPoint(root.Position)
+		if onScreen and screen.Z > 0 then
+			drawings.Tracer.From = tracerOrigin
+			drawings.Tracer.To = Vector2.new(screen.X, screen.Y)
+			drawings.Tracer.Thickness = Visuals.Tracers.Thickness
+			drawings.Tracer.Color = teamColor
+			drawings.Tracer.Visible = true
+		else
+			drawings.Tracer.Visible = false
+		end
+	else
+		drawings.Tracer.Visible = false
 	end
-	self._playerAdded = Players.PlayerAdded:Connect(hook)
+
+	if Visuals.Chams.Enabled then
+		ensureChams(target, character, teamColor, Visuals.Chams)
+	else
+		disableChams(target)
+	end
 end
 
-function esp:unbindPlayers()
-	if self._playerAdded then
-		self._playerAdded:Disconnect()
-		self._playerAdded = nil
+local function updateItem(item, entry)
+	local drawings = entry.drawings
+	if not item.Parent then
+		hideDrawings(drawings)
+		disableChams(item)
+		Visuals.RemoveItem(item)
+		return
 	end
-	self._playerBound = false
+
+	local worldPos = Visuals.GetItemPosition(item)
+	if not worldPos then
+		hideDrawings(drawings)
+		return
+	end
+
+	if localPos then
+		local dist = (worldPos - localPos).Magnitude
+		if dist > Visuals.Items.MaxDistance then
+			hideDrawings(drawings)
+			disableChams(item)
+			return
+		end
+	end
+
+	local screen, onScreen = camera:WorldToViewportPoint(worldPos)
+	if not onScreen or screen.Z <= 0 then
+		hideDrawings(drawings)
+		return
+	end
+
+	local screenPos = Vector2.new(screen.X, screen.Y)
+	drawings.Name.Position = screenPos
+	drawings.Name.Visible = true
+
+	if Visuals.Items.ShowDistance and localPos then
+		local dist = math.floor((worldPos - localPos).Magnitude)
+		drawings.Distance.Text = tostring(dist) .. " studs"
+		drawings.Distance.Position = screenPos + Vector2.new(0, 15)
+		drawings.Distance.Visible = true
+	else
+		drawings.Distance.Visible = false
+	end
+
+	if Visuals.Items.Chams.Enabled then
+		ensureChams(item, item, Visuals.Items.Chams.Color, Visuals.Items.Chams)
+	else
+		disableChams(item)
+	end
 end
 
-function esp:dispose()
-	if self._conn then
-		self._conn:Disconnect()
-		self._conn = nil
+local function onRender()
+	refreshFeatureFlags()
+	camera = workspace.CurrentCamera
+	if not camera then
+		return
 	end
-	self:unbindPlayers()
-	self:clear()
-	if cleardrawcache then
-		pcall(cleardrawcache)
+
+	local character = player.Character
+	localRoot = character and character:FindFirstChild("HumanoidRootPart")
+	localPos = localRoot and localRoot.Position or nil
+	if Visuals.Tracers.Enabled then
+		tracerOrigin = Visuals.GetTracerOrigin()
+	end
+
+	if anyPlayerEsp then
+		for target, entry in pairs(Visuals.Container) do
+			updatePlayer(target, entry)
+		end
+	else
+		for target, entry in pairs(Visuals.Container) do
+			hideDrawings(entry.drawings)
+			disableChams(target)
+		end
+	end
+
+	if anyItemEsp then
+		local now = os.clock()
+		if now - lastItemScan > 5 then
+			lastItemScan = now
+			scanExistingItems()
+		end
+		for item, entry in pairs(Visuals.ItemContainer) do
+			updateItem(item, entry)
+		end
+	else
+		for item, entry in pairs(Visuals.ItemContainer) do
+			hideDrawings(entry.drawings)
+			disableChams(item)
+		end
 	end
 end
 
-esp._conn = RunService.RenderStepped:Connect(update)
+local renderConnection = RunService.RenderStepped:Connect(onRender)
 
-if getgenv then
-	getgenv().esp = esp
+-- Item discovery without GetDescendants spam
+scanExistingItems = function()
+	if not Visuals.Items.Enabled then
+		return
+	end
+	for _, item in ipairs(workspace:GetDescendants()) do
+		if Visuals.IsValidItem(item) then
+			Visuals.CreateItem(item)
+		end
+	end
 end
 
-return esp
+workspace.DescendantAdded:Connect(function(item)
+	if Visuals.Items.Enabled and Visuals.IsValidItem(item) then
+		Visuals.CreateItem(item)
+	end
+end)
+
+-- Call after enabling item ESP / filling ValidItemNames
+function Visuals.RefreshItems()
+	scanExistingItems()
+end
+
+Players.PlayerAdded:Connect(function(target)
+	Visuals.Create(target)
+end)
+
+Players.PlayerRemoving:Connect(function(target)
+	Visuals.Remove(target)
+	if target == player then
+		Visuals.Destroy()
+	end
+end)
+
+for _, target in ipairs(Players:GetPlayers()) do
+	Visuals.Create(target)
+end
+
+function Visuals.Destroy()
+	if renderConnection then
+		renderConnection:Disconnect()
+		renderConnection = nil
+	end
+
+	for target in pairs(Visuals.Container) do
+		Visuals.Remove(target)
+	end
+	for item in pairs(Visuals.ItemContainer) do
+		Visuals.RemoveItem(item)
+	end
+	table.clear(Visuals.Container)
+	table.clear(Visuals.ItemContainer)
+	table.clear(Visuals.ChamsContainer)
+end
+
+return Visuals
