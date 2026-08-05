@@ -1,3 +1,13 @@
+--[[ Esp
+	Player / item ESP using Drawing + Highlights.
+
+	Optimized:
+	- One RenderStepped for everyone (not one per player/item)
+	- Cheap screen boxes (no GetExtentsSize every frame)
+	- Local root / camera cached once per frame
+	- Items via DescendantAdded (no GetDescendants spam)
+]]
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -166,45 +176,76 @@ function Visuals.GetItemPosition(item)
 	return nil
 end
 
--- Fast box: project head + feet from HRP (skips GetExtentsSize)
+-- Screen box from model bounding box (8 corners). Size is cached; pose updates every frame.
+local extentsCache = setmetatable({}, { __mode = "k" })
+
 local function getScreenBox(character)
 	local root = character:FindFirstChild("HumanoidRootPart")
 	if not root then
 		return nil
 	end
 
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local head = character:FindFirstChild("Head")
+	local cached = extentsCache[character]
+	local now = os.clock()
+	local cf, size
 
-	local topPos
-	local bottomPos
-	if head then
-		topPos = head.Position + Vector3.new(0, 0.5, 0)
-		bottomPos = root.Position - Vector3.new(0, (humanoid and humanoid.HipHeight or 2) + 1.5, 0)
+	if cached and (now - cached.time) < 1 then
+		size = cached.size
+		cf = root.CFrame * cached.offset
 	else
-		local height = (humanoid and humanoid.HipHeight or 2) + 2.5
-		topPos = root.Position + Vector3.new(0, height * 0.5, 0)
-		bottomPos = root.Position - Vector3.new(0, height * 0.5, 0)
+		local ok, boxCf, boxSize = pcall(character.GetBoundingBox, character)
+		if not ok or typeof(boxCf) ~= "CFrame" or typeof(boxSize) ~= "Vector3" then
+			return nil
+		end
+		cf = boxCf
+		size = boxSize
+		extentsCache[character] = {
+			time = now,
+			size = boxSize,
+			offset = root.CFrame:ToObjectSpace(boxCf),
+		}
 	end
 
-	local top, topOnScreen = camera:WorldToViewportPoint(topPos)
-	local bottom, bottomOnScreen = camera:WorldToViewportPoint(bottomPos)
-	if top.Z <= 0 and bottom.Z <= 0 then
+	local half = size * 0.5
+	local corners = {
+		cf * Vector3.new(-half.X, -half.Y, -half.Z),
+		cf * Vector3.new(-half.X, -half.Y, half.Z),
+		cf * Vector3.new(-half.X, half.Y, -half.Z),
+		cf * Vector3.new(-half.X, half.Y, half.Z),
+		cf * Vector3.new(half.X, -half.Y, -half.Z),
+		cf * Vector3.new(half.X, -half.Y, half.Z),
+		cf * Vector3.new(half.X, half.Y, -half.Z),
+		cf * Vector3.new(half.X, half.Y, half.Z),
+	}
+
+	local minX, minY = math.huge, math.huge
+	local maxX, maxY = -math.huge, -math.huge
+	local visible = false
+
+	for i = 1, 8 do
+		local screen = camera:WorldToViewportPoint(corners[i])
+		if screen.Z > 0 then
+			visible = true
+			if screen.X < minX then
+				minX = screen.X
+			end
+			if screen.Y < minY then
+				minY = screen.Y
+			end
+			if screen.X > maxX then
+				maxX = screen.X
+			end
+			if screen.Y > maxY then
+				maxY = screen.Y
+			end
+		end
+	end
+
+	if not visible then
 		return nil
 	end
-	if not topOnScreen and not bottomOnScreen and top.Z <= 0 then
-		return nil
-	end
 
-	local height = math.abs(bottom.Y - top.Y)
-	if height < 2 then
-		height = 2
-	end
-	local width = height * 0.65
-	local centerX = (top.X + bottom.X) * 0.5
-	local topY = math.min(top.Y, bottom.Y)
-
-	return Vector2.new(centerX - width * 0.5, topY), Vector2.new(width, height), root
+	return Vector2.new(minX, minY), Vector2.new(maxX - minX, maxY - minY), root
 end
 
 local function refreshFeatureFlags()
