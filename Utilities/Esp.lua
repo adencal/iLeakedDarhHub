@@ -1,17 +1,9 @@
---[[ Esp
-	Player / item ESP using Drawing + Highlights.
-
-	Optimized:
-	- One RenderStepped for everyone (not one per player/item)
-	- Cheap screen boxes (no GetExtentsSize every frame)
-	- Local root / camera cached once per frame
-	- Items via DescendantAdded (no GetDescendants spam)
-]]
-
+--[[ Services ]]--
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+--[[ Variables ]]--
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
@@ -80,6 +72,8 @@ local anyPlayerEsp = false
 local anyItemEsp = false
 local lastItemScan = 0
 local scanExistingItems
+
+--[[ Functions ]]--
 
 local function createDrawing(drawingType, properties)
 	local object = Drawing.new(drawingType)
